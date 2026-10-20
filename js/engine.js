@@ -119,7 +119,12 @@ export function evaluateProblem(problem, wall, climber, fit = DEFAULT_FIT) {
     const pen = footPenalty(feet);
     const mL = moveInfo(B, am, a, b, 'L', T, pen, false);
     const mR = moveInfo(B, am, a, b, 'R', T, pen, false);
-    const m = !mL ? mR : !mR ? mL : (mL.cost <= mR.cost ? mL : mR);
+    // La beta más fácil, pero entre las que se alcanzan: un movimiento fuera de alcance solo
+    // se elige si no queda otra (boulders del armador marcados con otro cuerpo).
+    const far = m => m.d > B.lanceMax;
+    const m = !mL ? mR : !mR ? mL
+      : far(mL) !== far(mR) ? (far(mL) ? mR : mL)
+      : (mL.cost <= mR.cost ? mL : mR);
     if (!m) continue;
     m.feet = feet.map(f => f.id);
     moves.push(m);
@@ -135,7 +140,7 @@ function jaccard(s, t) {
   return i / (s.size + t.size - i);
 }
 
-// opts: { targetV, moves, wanted: { cruce, lance, compresion }, count, budgetMs }
+// opts: { targetV, moves, wanted: { cruce, lance, compresion }, count, budgetMs, maxAttempts }
 export function generate(wall, climber, fit, opts, rng = Math.random) {
   const pts = wallPoints(wall);
   if (!pts) return { error: 'Primero calibra la escala en la pestaña Escala.' };
@@ -166,7 +171,7 @@ export function generate(wall, climber, fit, opts, rng = Math.random) {
   const minSteps = Math.max(2, opts.moves - 2), maxSteps = opts.moves + 2;
   const found = [];
   const t0 = performance.now();
-  for (let it = 0; it < 8000 && performance.now() - t0 < (opts.budgetMs ?? 1500); it++) {
+  for (let it = 0; it < (opts.maxAttempts ?? 8000) && performance.now() - t0 < (opts.budgetMs ?? 1500); it++) {
     const st = starts[Math.floor(rng() * starts.length)];
     let a = st[0], b = st[1] || st[0];
     if (b.x < a.x) [a, b] = [b, a];
@@ -216,7 +221,7 @@ export function generate(wall, climber, fit, opts, rng = Math.random) {
     if (!done) continue;
     const prob = { handSeq: seq, startCount: st.length, feet: [...feetSet].filter(id => !used.has(id)) };
     const ev = evaluateProblem(prob, wall, climber, fit);
-    if (!ev) continue;
+    if (!ev || ev.moves.some(m => m.d > B.lanceMax)) continue;
     let score = Math.abs(ev.V - opts.targetV) + 0.15 * Math.abs(ev.moves.length - opts.moves);
     for (const k of ['cruce', 'lance', 'compresion']) score += 1.2 * Math.max(0, (want[k] || 0) - ev.tags[k]);
     found.push({ ...prob, ev, score });
