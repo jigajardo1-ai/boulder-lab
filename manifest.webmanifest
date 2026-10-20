@@ -1,0 +1,14 @@
+{
+  "name": "Boulder Lab",
+  "short_name": "Boulder Lab",
+  "description": "Marca las presas de tu muro y genera boulders por grado V y tipo de movimiento.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#14181d",
+  "theme_color": "#14181d",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
