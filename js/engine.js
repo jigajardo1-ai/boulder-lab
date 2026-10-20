@@ -1,10 +1,12 @@
 // Motor: modelo del cuerpo, costo de cada movimiento, grado estimado, generador y calibración.
 //
-// Un boulder es { handSeq, startCount, feet }:
+// Un boulder es { handSeq, startCount, startFeet, feet }:
 //   handSeq    ids de presas de mano en orden (inicio primero, top al final)
 //   startCount 1 (inicio juntando manos en una presa) o 2
-//   feet       ids de presas de pie permitidas, o null para pies libres
-// Las presas de mano siempre se pueden usar de pie.
+//   startFeet  ids de las presas de pie del inicio (hasta 2)
+//   feet       null = pies libres después del inicio (lo normal). Una lista limita los pies
+//              a esas presas (boulders guardados con la primera versión).
+// Cualquier presa sirve de pie.
 
 import { wallPoints } from './model.js';
 
@@ -18,15 +20,23 @@ export function bodyModel(climber) {
     H, W,
     reach: 0.55 * W,                   // mano a mano, estático al límite
     lanceMax: 0.8 * W,                 // más allá no se propone
-    startMin: 0.6,                     // altura de presas de inicio
+    startMin: 0.6,                     // altura de las presas de mano del inicio
     startMax: 1.15 * H,
+    startFootMax: 0.9,                 // pies del inicio, desde el piso
     footHighest: 0.2 * H,              // pie más alto, medido bajo la mano más baja
     footLowest: 0.38 * W + 0.76 * H,   // pie más bajo (brazos estirados)
     footSide: 0.45 * H,                // separación lateral máxima del centro de las manos
     wide: 0.42 * W,                    // manos así de separadas y a la misma altura = compresión
+    side: 0.6 * W,                     // una presa nueva no se va más lejos que esto del centro de las manos
+    climbMin: 1.2,                     // el top queda al menos esto sobre la mano más alta del inicio
   };
 }
 
+// Reglas para que el boulder suba: la presa nueva queda sobre la mano más baja y,
+// a lo más, un poco bajo la mano más alta.
+export const RISE = { overLow: 0.1, underHigh: 0.25 };
+
+const f1 = x => x.toLocaleString('es-CL', { maximumFractionDigits: 1 });
 const angleMult = angle => 1 + (angle || 0) / 45 * 0.7;
 
 // Los dos mejores pies disponibles para una posición de manos a (izq.) y b (der.).
@@ -56,20 +66,22 @@ function moveInfo(B, am, a, b, moving, T, pen, strict) {
   const S = moving === 'L' ? b : a;   // mano que se queda
   const O = moving === 'L' ? a : b;   // de dónde sale la mano que se mueve
   if (T.id === S.id || T.id === O.id) return null;
-  if (strict && T.hand == null) return null;
   const d = Math.hypot(T.x - S.x, T.h - S.h);
   const cross = moving === 'R' ? T.x < S.x - 0.05 : T.x > S.x + 0.05;
   const lance = d > B.reach;
   if (strict) {
+    const low = Math.min(a.h, b.h), high = Math.max(a.h, b.h);
     if (d < 0.15 || d > B.lanceMax) return null;
+    if (Math.hypot(T.x - O.x, T.h - O.h) < 0.2) return null;
+    if (T.h < low + RISE.overLow || T.h < high - RISE.underHigh) return null;
+    if (Math.abs(T.x - (a.x + b.x) / 2) > B.side) return null;
     if (cross && d > 0.85 * B.reach) return null;
-    if (T.h < O.h - 0.15) return null;
     if (lance && T.h < S.h - 0.05) return null;
   }
   const nl = moving === 'L' ? T : a, nr = moving === 'R' ? T : b;
   const comp = !cross && Math.abs(nl.x - nr.x) >= B.wide && Math.abs(nl.h - nr.h) <= 0.35;
   const r = d / B.reach;
-  let cost = 1.2 * r * r + (T.hand ?? 2.2) + 0.5 * (S.hand ?? 2.2) + pen;
+  let cost = 1.2 * r * r + T.hand + 0.5 * S.hand + pen;
   if (lance) cost += 1.0 + 1.5 * (r - 1);
   if (cross) cost += 0.5;
   if (comp) cost += 0.6;
@@ -99,6 +111,7 @@ function countTags(moves) {
 }
 
 // Evalúa un boulder con la beta más fácil: en cada presa nueva mueve la mano que cuesta menos.
+// En el primer movimiento los pies son los del inicio; después, cualquier presa.
 export function evaluateProblem(problem, wall, climber, fit = DEFAULT_FIT) {
   const pts = wallPoints(wall);
   if (!pts) return null;
@@ -107,15 +120,16 @@ export function evaluateProblem(problem, wall, climber, fit = DEFAULT_FIT) {
   const two = problem.startCount === 2 && seq.length >= 3;
   const B = bodyModel(climber);
   const am = angleMult(wall.angle);
+  const startFeet = (problem.startFeet || []).map(id => pts.get(id)).filter(Boolean);
   const pool = problem.feet
-    ? [...new Set([...problem.feet, ...seq])].map(id => pts.get(id)).filter(Boolean)
+    ? [...new Set([...problem.feet, ...seq, ...startFeet.map(p => p.id)])].map(id => pts.get(id)).filter(Boolean)
     : [...pts.values()];
   let a = pts.get(seq[0]), b = two ? pts.get(seq[1]) : a;
   if (b.x < a.x) [a, b] = [b, a];
   const moves = [];
   for (const id of seq.slice(two ? 2 : 1)) {
     const T = pts.get(id);
-    const feet = feetFor(pool, B, a, b);
+    const feet = !moves.length && startFeet.length ? startFeet : feetFor(pool, B, a, b);
     const pen = footPenalty(feet);
     const mL = moveInfo(B, am, a, b, 'L', T, pen, false);
     const mR = moveInfo(B, am, a, b, 'R', T, pen, false);
@@ -140,31 +154,48 @@ function jaccard(s, t) {
   return i / (s.size + t.size - i);
 }
 
+// Inicios posibles: 1 o 2 presas de mano a una altura que se alcanza parado, con 2 pies bajos
+// debajo, y con muro suficiente arriba para que el boulder suba de verdad.
+export function startOptions(pts, B) {
+  const all = [...pts.values()].filter(p => p.h > 0);
+  const maxH = Math.max(...all.map(p => p.h));
+  const hiStart = Math.min(B.startMax, maxH - B.climbMin);
+  const low = all.filter(p => p.h >= B.startMin && p.h <= hiStart);
+  const feetPool = all.filter(p => p.h <= B.startFootMax);
+  const out = [];
+  const add = hands => {
+    const a = hands[0], b = hands[1] || hands[0];
+    const feet = feetFor(feetPool, B, a.x <= b.x ? a : b, a.x <= b.x ? b : a);
+    if (feet.length === 2) out.push({ hands, feet });
+  };
+  for (const p of low) if (p.hand <= 1.2) add([p]);
+  for (let i = 0; i < low.length; i++) {
+    for (let j = i + 1; j < low.length; j++) {
+      const p = low[i], q = low[j];
+      const d = Math.hypot(p.x - q.x, p.h - q.h);
+      if (d >= 0.15 && d <= 0.7 && Math.abs(p.h - q.h) <= 0.4) add([p, q]);
+    }
+  }
+  return { starts: out, maxH, hiStart };
+}
+
 // opts: { targetV, moves, wanted: { cruce, lance, compresion }, count, budgetMs, maxAttempts }
 export function generate(wall, climber, fit, opts, rng = Math.random) {
   const pts = wallPoints(wall);
   if (!pts) return { error: 'Primero calibra la escala en la pestaña Escala.' };
   const B = bodyModel(climber);
   const am = angleMult(wall.angle);
-  const all = [...pts.values()];
-  const hands = all.filter(p => p.hand != null && p.h > 0);
-  if (hands.length < 8) return { error: 'Marca al menos 8 presas de mano en la pestaña Presas.' };
+  const all = [...pts.values()].filter(p => p.h > 0);
+  if (all.length < 8) return { error: 'Marca al menos 8 presas en la pestaña Presas.' };
 
-  const maxH = Math.max(...hands.map(p => p.h));
-  const topMin = maxH - 0.6;
-  const low = hands.filter(p => p.h >= B.startMin && p.h <= B.startMax);
-  const starts = [];
-  for (const p of low) if (p.hand <= 1.2) starts.push([p]);
-  for (let i = 0; i < low.length; i++) {
-    for (let j = i + 1; j < low.length; j++) {
-      const p = low[i], q = low[j];
-      const d = Math.hypot(p.x - q.x, p.h - q.h);
-      if (d >= 0.15 && d <= 0.7 && Math.abs(p.h - q.h) <= 0.4) starts.push([p, q]);
-    }
+  const { starts, maxH, hiStart } = startOptions(pts, B);
+  if (hiStart < B.startMin) {
+    return { error: `Según la escala, la presa más alta está a ${f1(maxH)} m del piso. Es muy poco muro para un boulder: revisa la escala y el piso.` };
   }
   if (!starts.length) {
-    return { error: `No hay presas de inicio entre ${B.startMin.toFixed(1)} y ${B.startMax.toFixed(1)} m del piso. Revisa la escala y el piso.` };
+    return { error: `No encontré un inicio: hacen falta presas de mano entre ${f1(B.startMin)} y ${f1(hiStart)} m del piso, con dos presas de pie bajo ${f1(B.startFootMax)} m. Revisa la escala y el piso.` };
   }
+  const topMin = maxH - 0.6;
 
   const want = opts.wanted || {};
   const Dt = (opts.targetV - fit.b) / fit.a;
@@ -173,27 +204,27 @@ export function generate(wall, climber, fit, opts, rng = Math.random) {
   const t0 = performance.now();
   for (let it = 0; it < (opts.maxAttempts ?? 8000) && performance.now() - t0 < (opts.budgetMs ?? 1500); it++) {
     const st = starts[Math.floor(rng() * starts.length)];
-    let a = st[0], b = st[1] || st[0];
+    let a = st.hands[0], b = st.hands[1] || st.hands[0];
     if (b.x < a.x) [a, b] = [b, a];
-    const used = new Set(st.map(p => p.id));
-    const seq = st.map(p => p.id);
-    const feetSet = new Set();
+    const used = new Set([...st.hands, ...st.feet].map(p => p.id));
+    const seq = st.hands.map(p => p.id);
+    const startHigh = Math.max(a.h, b.h);
     const need = { cruce: want.cruce || 0, lance: want.lance || 0, compresion: want.compresion || 0 };
     let last = null, steps = 0, done = false;
     while (steps < maxSteps) {
-      const feet = feetFor(all, B, a, b);
+      const feet = steps === 0 ? st.feet : feetFor(all, B, a, b);
       const pen = footPenalty(feet);
       const goal = Dt * (0.55 + 0.45 * rng());
+      const high = Math.max(a.h, b.h);
       const cands = [];
       let total = 0;
       for (const hand of ['L', 'R']) {
-        const O = hand === 'L' ? a : b;
-        for (const T of hands) {
+        for (const T of all) {
           if (used.has(T.id)) continue;
           const m = moveInfo(B, am, a, b, hand, T, pen, true);
           if (!m) continue;
           let w = Math.exp(-1.2 * Math.abs(m.cost - goal));
-          w *= 1 + 2 * Math.min(Math.max(T.h - O.h, 0), 0.8);
+          w *= 1 + 2 * Math.min(Math.max(T.h - high, 0), 0.8);
           if (hand === last) w *= 0.4;
           if (m.cross && need.cruce > 0) w *= 4;
           if (m.lance && need.lance > 0) w *= 4;
@@ -207,7 +238,6 @@ export function generate(wall, climber, fit, opts, rng = Math.random) {
       let x = rng() * total, pick = cands[cands.length - 1];
       for (const c of cands) { x -= c[2]; if (x <= 0) { pick = c; break; } }
       const [m, T] = pick;
-      for (const f of feet) feetSet.add(f.id);
       if (m.cross) need.cruce--;
       if (m.lance) need.lance--;
       if (m.comp) need.compresion--;
@@ -216,10 +246,13 @@ export function generate(wall, climber, fit, opts, rng = Math.random) {
       last = m.moving;
       steps++;
       if (m.moving === 'L') a = T; else b = T;
-      if (T.h >= topMin && steps >= minSteps) { done = true; break; }
+      // Se termina en una presa de la parte alta, que sea la más alta del boulder.
+      const isTop = T.h >= topMin && T.h >= startHigh + B.climbMin
+        && seq.every(id => id === T.id || pts.get(id).h < T.h);
+      if (isTop && steps >= minSteps) { done = true; break; }
     }
     if (!done) continue;
-    const prob = { handSeq: seq, startCount: st.length, feet: [...feetSet].filter(id => !used.has(id)) };
+    const prob = { handSeq: seq, startCount: st.hands.length, startFeet: st.feet.map(p => p.id), feet: null };
     const ev = evaluateProblem(prob, wall, climber, fit);
     if (!ev || ev.moves.some(m => m.d > B.lanceMax)) continue;
     let score = Math.abs(ev.V - opts.targetV) + 0.15 * Math.abs(ev.moves.length - opts.moves);

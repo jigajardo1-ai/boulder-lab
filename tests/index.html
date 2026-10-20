@@ -17,8 +17,8 @@
   <p id="sum">Corriendo…</p>
   <ul id="out"></ul>
   <script type="module">
-    import { wallPoints, HOLD_TYPES } from '../js/model.js';
-    import { generate, evaluateProblem, calibrateAll, bodyModel, DEFAULT_FIT, REF_CLIMBER } from '../js/engine.js';
+    import { wallPoints, migrateWall } from '../js/model.js';
+    import { generate, evaluateProblem, calibrateAll, bodyModel, DEFAULT_FIT, REF_CLIMBER, RISE } from '../js/engine.js';
 
     const out = document.getElementById('out');
     const results = [];
@@ -54,7 +54,7 @@
           });
         }
       }
-      for (let c = 0; c < 12; c++) holds.push({ id: 'h' + n++, x: 40 + c * 80, y: 1080 - Math.round(rng() * 60), type: 'pie', size: 'S' });
+      for (let c = 0; c < 12; c++) holds.push({ id: 'h' + n++, x: 40 + c * 80, y: 1080 - Math.round(rng() * 60), type: 'regleta', size: 'S' });
       return {
         id: 'test', name: 'Sintético', imgW: 1000, imgH: 1200, angle,
         scale: { cm: 122, a: { x: 100, y: 1140 }, b: { x: 405, y: 1140 } }, floorY: 1150,
@@ -68,7 +68,7 @@
     const B = bodyModel(climber);
     const wall = syntheticWall(7);
     const pts = wallPoints(wall);
-    const maxH = Math.max(...[...pts.values()].filter(p => p.hand != null).map(p => p.h));
+    const maxH = Math.max(...[...pts.values()].map(p => p.h));
 
     check('Escala: el muro mide 4,6 m', Math.abs(wall.floorY * 0.4 / 100 - 4.6) < 1e-9);
 
@@ -91,9 +91,21 @@
         const maxD = Math.max(...r.ev.moves.map(m => m.d));
         const okReach = maxD <= B.lanceMax + 1e-9;
         const okUnique = new Set(r.handSeq).size === r.handSeq.length;
-        const okFeet = r.feet.every(id => !r.handSeq.includes(id));
-        check(`V${targetV} opción ${i + 1}: inicio, top, alcance, presas únicas`, okStart && okTop && okReach && okUnique && okFeet,
+        check(`V${targetV} opción ${i + 1}: inicio, top, alcance, presas únicas`, okStart && okTop && okReach && okUnique,
           `inicio ${starts.map(p => p.h.toFixed(2)).join('/')} m, top ${top.h.toFixed(2)} m, mov. más largo ${(maxD * 100).toFixed(0)} cm de ${(B.lanceMax * 100).toFixed(0)}`);
+        const feet = r.startFeet.map(id => pts.get(id));
+        const lowHand = Math.min(...starts.map(p => p.h));
+        const okFeet = feet.length === 2 && r.feet === null && feet.every(f => f.h <= B.startFootMax && f.h < lowHand - B.footHighest + 1e-9 && !r.handSeq.includes(f.id));
+        const okTopHigh = r.handSeq.every(id => id === top.id || pts.get(id).h < top.h) && top.h >= Math.max(...starts.map(p => p.h)) + B.climbMin - 1e-9;
+        // Cada presa nueva queda sobre la mano más baja y no muy bajo la más alta.
+        let worst = Infinity;
+        for (const m of r.ev.moves) {
+          const lo = Math.min(pts.get(m.from).h, pts.get(m.stay).h), hi = Math.max(pts.get(m.from).h, pts.get(m.stay).h);
+          const T = pts.get(m.to).h;
+          worst = Math.min(worst, T - (lo + RISE.overLow), T - (hi - RISE.underHigh));
+        }
+        check(`V${targetV} opción ${i + 1}: 2 pies de inicio bajos, top más alto que todo, siempre sube`, okFeet && okTopHigh && worst >= -1e-9,
+          `pies ${feet.map(f => f.h.toFixed(2)).join('/')} m, holgura de subida ${(worst * 100).toFixed(0)} cm`);
       }
     }
     check('Pedir más grado da boulders más duros', means[1] < means[3] && means[3] < means[5],
@@ -129,7 +141,7 @@
       const gen = generate(w, REF_CLIMBER, DEFAULT_FIT, { targetV: 3, moves: 6, wanted: {}, count: 3, ...T }, mulberry32(3));
       const gen2 = generate(w, REF_CLIMBER, DEFAULT_FIT, { targetV: 5, moves: 7, wanted: {}, count: 3, ...T }, mulberry32(4));
       w.problems = [...gen.results, ...gen2.results].map((r, i) => ({
-        id: 'g' + i, source: 'gym', handSeq: r.handSeq, startCount: r.startCount, feet: r.feet, log: [],
+        id: 'g' + i, source: 'gym', handSeq: r.handSeq, startCount: r.startCount, startFeet: r.startFeet, feet: null, log: [],
         gradeSetter: Math.round(r.ev.V) + 2,
       }));
       const fit = calibrateAll([w]);
@@ -145,6 +157,18 @@
       const w = syntheticWall(7);
       w.scale = null;
       check('Sin escala, el generador avisa en vez de fallar', !!generate(w, climber, DEFAULT_FIT, { targetV: 2, moves: 5 }).error);
+      const w2 = syntheticWall(7);
+      w2.scale.cm = 40;
+      const r2 = generate(w2, climber, DEFAULT_FIT, { targetV: 2, moves: 5, ...T });
+      check('Con una escala que deja el muro en 1,5 m, avisa que revise la escala', !!r2.error && /escala/.test(r2.error), r2.error || 'generó igual');
+    }
+    {
+      const w = syntheticWall(7);
+      w.holds.push({ id: 'old', x: 500, y: 1100, type: 'pie', size: 'S' });
+      w.problems.push({ id: 'p', source: 'gym', handSeq: ['h100', 'h101', 'h90'], startCount: 2, feet: ['old'], log: [] });
+      const changed = migrateWall(w);
+      const hOld = w.holds.find(h => h.id === 'old');
+      check('Migración: presas "pie" de la primera versión pasan a regleta chica', changed && hOld.type === 'regleta' && hOld.size === 'S' && Array.isArray(w.problems[0].startFeet));
     }
 
     const bad = results.filter(r => !r.ok).length;

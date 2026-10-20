@@ -1,4 +1,4 @@
-import { HOLD_TYPES, SIZES, GRADES, gradeLabel, cmPerPx, holdRadiusPx } from './model.js';
+import { HOLD_TYPES, SIZES, GRADES, gradeLabel, cmPerPx, holdRadiusPx, migrateWall } from './model.js';
 import { evaluateProblem, generate, calibrateAll, REF_CLIMBER } from './engine.js';
 import { drawScene, renderShareImage, ROLE_COLORS } from './render.js';
 import * as store from './store.js';
@@ -14,6 +14,7 @@ const MOVE_TAGS = { cruce: 'Cruce', lance: 'Lance', compresion: 'Compresión' };
 const FEEL = { facil: 'más fácil que el grado', justo: 'justo', dificil: 'más difícil que el grado' };
 
 let S = store.load();
+if (S.walls.map(migrateWall).some(Boolean)) store.save(S);
 const ui = {
   wall: null, img: null, imgUrl: null, tab: 'presas',
   view: { s: 1, ox: 0, oy: 0 }, zoomed: false,
@@ -174,7 +175,7 @@ $('#fileImport').addEventListener('change', async e => {
     for (const w of d.walls) {
       w.holds ||= [];
       w.problems ||= [];
-      for (const p of w.problems) p.log ||= [];
+      migrateWall(w);
       const i = S.walls.findIndex(x => x.id === w.id);
       if (i >= 0 && !replace) continue;
       if (i >= 0) { S.walls[i] = w; replaced++; } else { S.walls.push(w); added++; }
@@ -436,15 +437,18 @@ function onTap(p) {
     if (d.mode === 'manos') {
       const i = d.handSeq.indexOf(hit.id);
       if (i >= 0) d.handSeq.splice(i, 1);
-      else if (HOLD_TYPES[hit.type].hand == null) { toast('Esa presa está marcada como solo de pie'); return; }
       else {
         d.handSeq.push(hit.id);
-        d.feetList = d.feetList.filter(x => x !== hit.id);
+        d.startFeet = d.startFeet.filter(x => x !== hit.id);
       }
     } else {
-      if (d.handSeq.includes(hit.id)) { toast('Esa ya es de mano, y las manos también sirven de pie'); return; }
-      const i = d.feetList.indexOf(hit.id);
-      if (i >= 0) d.feetList.splice(i, 1); else d.feetList.push(hit.id);
+      if (d.handSeq.includes(hit.id)) { toast('Esa ya es de mano'); return; }
+      const i = d.startFeet.indexOf(hit.id);
+      if (i >= 0) d.startFeet.splice(i, 1);
+      else {
+        d.startFeet.push(hit.id);
+        if (d.startFeet.length > 2) d.startFeet.shift();
+      }
     }
   } else {
     return;
@@ -463,9 +467,11 @@ function renderPanel() {
 
 const chip = (act, v, label, on, extra = '') => `<button class="chip ${on ? 'on' : ''}" data-act="${act}" data-v="${v}" ${extra}>${label}</button>`;
 
-const legend = () => `<div class="legend">
-  <span><i style="--c:${ROLE_COLORS.start}"></i>Inicio</span><span><i style="--c:${ROLE_COLORS.hand}"></i>Mano</span>
-  <span><i style="--c:${ROLE_COLORS.top}"></i>Top</span><span><i style="--c:${ROLE_COLORS.foot}"></i>Pie</span></div>`;
+// Después del inicio los pies son libres. El amarillo solo aparece en boulders guardados
+// con la primera versión, que limitaban los pies a ciertas presas.
+const legend = p => `<div class="legend">
+  <span><i style="--c:${ROLE_COLORS.start}"></i>Inicio (I manos, P pies)</span><span><i style="--c:${ROLE_COLORS.hand}"></i>Mano</span>
+  <span><i style="--c:${ROLE_COLORS.top}"></i>Top</span>${p?.feet ? `<span><i style="--c:${ROLE_COLORS.foot}"></i>Pie</span>` : ''}</div>`;
 
 const needScale = () => `
   <p class="status warn">Primero marca la escala y el piso.</p>
@@ -481,6 +487,11 @@ function tagText(ev) {
   return out.join(', ') || 'estático';
 }
 
+const holdName = h => {
+  const t = HOLD_TYPES[h.type], z = SIZES[h.size];
+  return `${t.label.toLowerCase()} ${t.fem ? z.label.toLowerCase() : z.masc}`;
+};
+
 function movesList(ev) {
   if (!ev || !ev.moves.length) return '';
   const byId = new Map(ui.wall.holds.map(h => [h.id, h]));
@@ -491,14 +502,16 @@ function movesList(ev) {
     if (m.lance) b.push('lance');
     if (m.comp) b.push('compresión');
     if (!m.feet.length) b.push('sin pies');
-    return `<li>${m.moving === 'L' ? 'Izquierda' : 'Derecha'} a ${HOLD_TYPES[h.type].label.toLowerCase()} ${SIZES[h.size].label.toLowerCase()}, a ${Math.round(m.d * 100)} cm de la otra mano${b.map(x => `<span class="badge">${x}</span>`).join('')}</li>`;
+    return `<li>${m.moving === 'L' ? 'Izquierda' : 'Derecha'} a ${holdName(h)}, a ${Math.round(m.d * 100)} cm de la otra mano${b.map(x => `<span class="badge">${x}</span>`).join('')}</li>`;
   }).join('')}</ol>`;
 }
 
 function panelEscala() {
   const w = ui.wall, k = cmPerPx(w);
   const picking = ui.pending === 'A' || ui.pending === 'B';
-  const tall = k && w.floorY != null ? (w.floorY * k / 100).toLocaleString('es-CL', { maximumFractionDigits: 1 }) : null;
+  const m = k && w.floorY != null ? w.floorY * k / 100 : null;
+  const tall = m != null ? m.toLocaleString('es-CL', { maximumFractionDigits: 1 }) : null;
+  const odd = m != null && (m < 2 || m > 8);
   return `
     <div class="step ${k ? 'ok' : ''}">
       <b>1. Distancia conocida</b>
@@ -517,7 +530,9 @@ function panelEscala() {
       <b>3. Ángulo del muro</b>
       <div class="chips">${[0, 10, 20, 30, 40, 50].map(a => chip('angle', a, a === 0 ? 'Vertical' : `${a}° desplome`, (w.angle || 0) === a)).join('')}</div>
     </div>
-    <p class="status ${tall ? 'ok' : 'warn'}">${tall ? `Según la escala, la foto muestra unos ${tall} m de muro sobre el piso. Si no calza con la realidad, vuelve a marcar.` : 'Falta marcar la escala y el piso.'}</p>
+    <p class="status ${tall && !odd ? 'ok' : 'warn'}">${!tall ? 'Falta marcar la escala y el piso.'
+      : odd ? `Según la escala, la foto muestra ${tall} m de muro sobre el piso. Un muro de boulder suele tener entre 3 y 5 m: revisa la distancia en cm y que los dos puntos estén bien marcados.`
+      : `Según la escala, la foto muestra unos ${tall} m de muro sobre el piso. Si no calza con la realidad, vuelve a marcar.`}</p>
     ${tall ? '<div class="row"><button class="btn primary" data-act="goto" data-v="presas">Seguir con las presas</button></div>' : ''}`;
 }
 
@@ -525,17 +540,17 @@ function panelPresas() {
   const w = ui.wall;
   const h = ui.sel ? w.holds.find(x => x.id === ui.sel) : null;
   const type = h ? h.type : ui.holdType, size = h ? h.size : ui.holdSize;
-  const nHands = w.holds.filter(x => HOLD_TYPES[x.type].hand != null).length;
+  const n = w.holds.length;
   return `
-    <p class="hint">${h ? 'Presa seleccionada: cambia su tipo o tamaño, o bórrala.' : 'Elige tipo y tamaño, y toca cada presa en la foto. Pellizca o usa + para hacer zoom. "Pie" es una presa que solo sirve para pisar.'}</p>
+    <p class="hint">${h ? 'Presa seleccionada: cambia su tipo o tamaño, o bórrala.' : 'Elige tipo y tamaño, y toca cada presa en la foto, también las chicas de abajo: cualquier presa sirve de pie. Pellizca o usa + para hacer zoom.'}</p>
     <div class="chips">${Object.entries(HOLD_TYPES).map(([k, t]) => chip('type', k, t.label, type === k, `style="--c:${t.color}"`)).join('')}</div>
     <div class="chips">${Object.entries(SIZES).map(([k, z]) => chip('size', k, z.label, size === k)).join('')}</div>
     <div class="row">
       ${h ? '<button class="btn danger" data-act="delHold">Borrar presa</button><button class="btn" data-act="deselect">Listo</button>'
           : `<button class="btn" data-act="undo" ${w.holds.length ? '' : 'disabled'}>Deshacer</button>`}
-      <span class="count">${w.holds.length} presas · ${nHands} de mano</span>
+      <span class="count">${n} presas</span>
     </div>
-    ${!h && nHands >= 8 && ready(w) ? '<div class="row"><button class="btn primary" data-act="goto" data-v="generar">Generar boulders</button></div>' : ''}`;
+    ${!h && n >= 8 && ready(w) ? '<div class="row"><button class="btn primary" data-act="goto" data-v="generar">Generar boulders</button></div>' : ''}`;
 }
 
 function panelGym() {
@@ -554,7 +569,7 @@ function panelGym() {
 
 const draftProblem = () => {
   const d = ui.draft;
-  return { handSeq: d.handSeq, startCount: d.startCount, feet: d.feetFree ? null : d.feetList };
+  return { handSeq: d.handSeq, startCount: d.startCount, startFeet: d.startFeet, feet: d.feet };
 };
 
 function panelDraft() {
@@ -568,12 +583,11 @@ function panelDraft() {
       <input type="text" class="grow" data-field="draftName" placeholder="Nombre o color, ej. Rosado" value="${esc(d.name)}">
       <select data-field="draftGrade" aria-label="Grado del armador">${GRADES.map(g => `<option value="${g}" ${g === d.gradeSetter ? 'selected' : ''}>${gradeLabel(g)}</option>`).join('')}</select>
     </div>
-    <div class="chips">${chip('draftMode', 'manos', 'Marcar manos', d.mode === 'manos')}${chip('draftMode', 'pies', 'Marcar pies', d.mode === 'pies')}</div>
+    <div class="chips">${chip('draftMode', 'manos', 'Manos en orden', d.mode === 'manos')}${chip('draftMode', 'pies', 'Pies de inicio', d.mode === 'pies')}</div>
     <div class="chips">${chip('draftStart', 1, 'Inicio en 1 presa', d.startCount === 1)}${chip('draftStart', 2, 'Inicio en 2 presas', d.startCount === 2)}</div>
-    <label class="check"><input type="checkbox" data-field="draftFeetFree" ${d.feetFree ? 'checked' : ''}> Pies libres (cualquier presa del muro)</label>
-    <p class="hint">${d.mode === 'manos' ? 'Toca las presas de mano en orden: inicio primero, top al final. Toca de nuevo para quitar.' : 'Toca las presas de pie del boulder. Las de mano también cuentan como pie.'}</p>
-    ${legend()}
-    <p class="status">${plural(d.handSeq.length, 'mano', 'manos')} · ${d.feetFree ? 'pies libres' : plural(d.feetList.length, 'pie', 'pies')}${ev ? ` · la app estima ${gradeLabel(ev.V)}` : ''}</p>
+    <p class="hint">${d.mode === 'manos' ? 'Toca las presas de mano en orden: las de inicio primero, el top al final. Toca de nuevo para quitar.' : 'Toca las 2 presas donde van los pies al partir. Después los pies quedan libres.'}</p>
+    ${legend(prob)}
+    <p class="status">${plural(d.handSeq.length, 'mano', 'manos')} · ${plural(d.startFeet.length, 'pie', 'pies')} de inicio${ev ? ` · la app estima ${gradeLabel(ev.V)}` : ''}</p>
     <div class="row">
       <button class="btn primary" data-act="saveDraft" ${okLen ? '' : 'disabled'}>Guardar</button>
       <button class="btn" data-act="cancelDraft">Cancelar</button>
@@ -595,7 +609,7 @@ function panelGenerar() {
   const w = ui.wall;
   if (!ready(w)) return needScale();
   const g = ui.gen, F = fit();
-  const nHands = w.holds.filter(h => HOLD_TYPES[h.type].hand != null).length;
+  const nHands = w.holds.length;
   let html = `
     <div class="row">
       <label class="inline">Grado <select data-field="genV">${GRADES.slice(1, 12).map(v => `<option value="${v}" ${v === g.targetV ? 'selected' : ''}>${gradeLabel(v)}</option>`).join('')}</select></label>
@@ -605,7 +619,7 @@ function panelGenerar() {
     <p class="hint">Toca un movimiento para pedirlo (dos toques = dos veces, tres = quitar). Grados para tu cuerpo: ${S.climber.heightCm} cm de altura y ${S.climber.wingspanCm} cm de envergadura${F.n ? '' : ', sin calibrar todavía'}. <a href="#" data-act="profile">Cambiar</a></p>
     <div class="row">
       <button class="btn primary" data-act="generate" ${ui.busy || nHands < 8 ? 'disabled' : ''}>${ui.busy ? 'Buscando…' : 'Generar'}</button>
-      ${nHands < 8 ? `<span class="hint">Marca al menos 8 presas de mano (llevas ${nHands}).</span>` : ''}
+      ${nHands < 8 ? `<span class="hint">Marca al menos 8 presas (llevas ${nHands}).</span>` : ''}
     </div>`;
   if (ui.genMsg) html += `<p class="status warn">${esc(ui.genMsg)}</p>`;
   if (ui.results.length) {
@@ -613,7 +627,7 @@ function panelGenerar() {
       <span><b>Opción ${i + 1}</b><small>${r.ev.moves.length} mov · ${tagText(r.ev)}</small></span>
       <span class="grade">${gradeLabel(r.ev.V)}</span></button></li>`).join('')}</ul>`;
     const r = ui.results[ui.resultIdx];
-    html += legend() + movesList(r.ev) + `
+    html += legend(r) + movesList(r.ev) + `
       <div class="row">
         <button class="btn primary" data-act="saveResult" ${r.savedId ? 'disabled' : ''}>${r.savedId ? 'Guardado ✓' : 'Guardar'}</button>
         <button class="btn" data-act="shareResult">Compartir imagen</button>
@@ -643,8 +657,8 @@ function panelDetail() {
       <b class="grow">${esc(p.name)}</b>
       ${p.source === 'gym' ? `<span class="grade" title="Grado del armador">${gradeLabel(p.gradeSetter)}</span>` : ''}
     </div>
-    <p class="hint">${p.source === 'gym' ? `Armador: ${gradeLabel(p.gradeSetter)}. ` : ''}Para tu cuerpo la app estima ${gradeLabel(ev?.V)}${p.feet ? '' : ', con pies libres'}.</p>
-    ${legend()}${movesList(ev)}
+    <p class="hint">${p.source === 'gym' ? `Armador: ${gradeLabel(p.gradeSetter)}. ` : ''}Para tu cuerpo la app estima ${gradeLabel(ev?.V)}${p.feet ? ', con los pies marcados' : ''}.</p>
+    ${legend(p)}${movesList(ev)}
     <div class="row">
       <button class="btn primary" data-act="logOpen">Registrar intento</button>
       <button class="btn" data-act="shareProblem">Compartir imagen</button>
@@ -740,16 +754,16 @@ $('#panel').addEventListener('click', e => {
     }
 
     case 'newGym':
-      ui.draft = { name: '', gradeSetter: 2, startCount: 2, handSeq: [], feetList: [], feetFree: true, mode: 'manos' };
+      ui.draft = { name: '', gradeSetter: 2, startCount: 2, handSeq: [], startFeet: [], feet: null, mode: 'manos' };
       break;
-    case 'draftMode': d.mode = v; if (v === 'pies') d.feetFree = false; break;
+    case 'draftMode': d.mode = v; break;
     case 'draftStart': d.startCount = +v; break;
     case 'cancelDraft': ui.show = d.id || null; ui.draft = null; break;
     case 'saveDraft': {
       const prob = d.id ? findProblem(d.id) : { id: uid(), source: 'gym', createdAt: Date.now(), log: [] };
       Object.assign(prob, {
         name: d.name.trim() || `Armador ${gradeLabel(d.gradeSetter)}`, gradeSetter: d.gradeSetter,
-        handSeq: [...d.handSeq], startCount: d.startCount, feet: d.feetFree ? null : [...d.feetList],
+        handSeq: [...d.handSeq], startCount: d.startCount, startFeet: [...d.startFeet], feet: d.feet,
       });
       if (!d.id) w.problems.push(prob);
       save();
@@ -761,7 +775,7 @@ $('#panel').addEventListener('click', e => {
     case 'editGym':
       ui.draft = {
         id: p.id, name: p.name, gradeSetter: p.gradeSetter, startCount: p.startCount, handSeq: [...p.handSeq],
-        feetList: [...(p.feet || [])], feetFree: p.feet == null, mode: 'manos',
+        startFeet: [...(p.startFeet || [])], feet: p.feet ? [...p.feet] : null, mode: 'manos',
       };
       ui.show = null;
       ui.logDraft = null;
@@ -804,7 +818,7 @@ $('#panel').addEventListener('click', e => {
       const prob = {
         id: uid(), source: 'gen', createdAt: Date.now(), log: [], gradeSetter: null,
         name: `Generado ${n} · ${gradeLabel(r.ev.V)}`,
-        handSeq: [...r.handSeq], startCount: r.startCount, feet: [...r.feet],
+        handSeq: [...r.handSeq], startCount: r.startCount, startFeet: [...r.startFeet], feet: null,
         request: { targetV: g.targetV, moves: g.moves, wanted: { ...g.wanted } },
       };
       w.problems.push(prob);
@@ -839,7 +853,6 @@ $('#panel').addEventListener('input', e => {
 $('#panel').addEventListener('change', e => {
   const f = e.target.dataset.field, t = e.target;
   if (f === 'draftGrade') ui.draft.gradeSetter = +t.value;
-  else if (f === 'draftFeetFree') { ui.draft.feetFree = t.checked; if (!t.checked) ui.draft.mode = 'pies'; }
   else if (f === 'genV') ui.gen.targetV = +t.value;
   else if (f === 'logAvoid') ui.logDraft.avoid = t.checked;
   else if (f !== 'scaleCm') return;

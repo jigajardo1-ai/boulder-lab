@@ -2,14 +2,15 @@
 
 import { HOLD_TYPES, holdRadiusPx } from './model.js';
 
-export const ROLE_COLORS = { start: '#30d158', hand: '#0a84ff', top: '#ff375f', foot: '#ffd60a' };
-const DARK_TEXT = { start: true, foot: true };
+export const ROLE_COLORS = { start: '#30d158', startFoot: '#30d158', hand: '#0a84ff', top: '#ff375f', foot: '#ffd60a' };
+const DARK_TEXT = { start: true, startFoot: true, foot: true };
 
 export function problemRoles(problem) {
   const roles = new Map();
   const seq = problem.handSeq;
   const nStart = problem.startCount === 2 && seq.length >= 3 ? 2 : 1;
   for (const id of problem.feet || []) roles.set(id, { role: 'foot' });
+  for (const id of problem.startFeet || []) roles.set(id, { role: 'startFoot', label: 'P' });
   seq.forEach((id, i) => {
     if (i < nStart) roles.set(id, { role: 'start', label: 'I' });
     else if (i === seq.length - 1) roles.set(id, { role: 'top', label: 'T' });
